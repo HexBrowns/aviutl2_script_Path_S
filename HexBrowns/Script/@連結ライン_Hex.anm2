@@ -21,7 +21,7 @@ else
 end
 
 @描画
---information:描画@連結ライン_Hex v2.01 by HexBrowns
+--information:描画@連結ライン_Hex v2.10 by HexBrowns
 --label:HexScript
 --dialog:接続ID(カンマ区切り),ids="1,2";
 --track@width:太さ,0,500,10,0.01
@@ -47,6 +47,94 @@ end
 --track@antialias:ぼかし幅,0,100,1,0.01
 --check@close_path:パスを閉じる,false
 --text@code:コード,
+--group:線の先細り,false
+--track@taper_start_len:始まりの長さ,0,100,0,0.01
+--track@taper_end_len:終わりの長さ,0,100,0,0.01
+--track@taper_start_width:始まりの太さ,0,100,0,0.01
+--track@taper_end_width:終わりの太さ,0,100,0,0.01
+--track@taper_start_round:始まりの丸み,0,100,0,0.01
+--track@taper_end_round:終わりの丸み,0,100,0,0.01
+--group:線の波,false
+--track@wave_amount:波の大きさ,0,100,0,0.01
+--track@wave_length:波長,4,4000,100,0.01
+--track@wave_phase:波の位相,-36000,36000,0,0.01
+--group
+--[[pixelshader@ps_cl_taper:
+// 太さが点ごとに変わる線（線の先細り・線の波。v2.10）。
+// 点 i（0 始まり）の座標を get_point(i)、半径を get_point(n + i).x で読む（Path_S.send と同じ形式）。
+// decode_float と get_point は Path_S v2.30 の carve の写し（sigma-axis, MIT）。
+// 区間 i-1 から i は 2 つの円の凸包（太さが直線的に変わるカプセル）で、距離は全区間の最小を取る。
+// split_f は「その点で始まる区間を前とつながない」点の番号（2 本に分かれる「始端と末端」用。0 で無し）。
+// 縁の濃さは Path_S の carve と同じ 1 - (距離 - 半径) / ぼかし幅。出力は乗算済み。
+// 重さの対策: 点を chunk_f 個の区間ずつの塊に分け、塊 c の外接矩形（半径＋ぼかし幅＋1px で広げたもの）を
+// get_point(2n + 2c)（左上）・get_point(2n + 2c + 1)（右下）で読む。矩形の外の画素では、その塊の距離が
+// ぼかし幅より遠く濃さに効かないので、区間を回さない（濃さは全区間を回すのと同じ）。
+// 正本: この @描画 の ps_cl_taper。@2関節IK の ps_cl_taper_ik は写し（直すときは両方）
+Texture2D<half4> coords : register(t0);
+cbuffer constant0 : register(b0) {
+    float4 col_v;
+    float n_pts_f;
+    float split_f;
+    float aa_thick;
+    float chunk_f;
+};
+float decode_float(half3 c)
+{
+    const uint3 c_i = floor(255 * c + 0.5);
+    const int i = (c_i.r << 8) | (c_i.g << 16) | (c_i.b << 24);
+    return i / float(1 << 16);
+}
+float2 get_point(uint i)
+{
+    static const uint log2_span_x = 12, span_x = 1 << log2_span_x;
+    const uint x = (i << 1) & (span_x - 1), y = i >> (log2_span_x - 1);
+    return float2(
+        decode_float(coords[uint2(x | 0, y)].rgb),
+        decode_float(coords[uint2(x | 1, y)].rgb));
+}
+float4 ps_cl_taper(float4 pos : SV_Position) : SV_Target
+{
+    const uint n = uint(n_pts_f);
+    const uint split = uint(split_f);
+    const uint chunk = uint(chunk_f);
+    const uint n_chunks = max((n + chunk - 2) / chunk, 1);
+    float d = 1e20;
+    [loop] for (uint c = 0; c < n_chunks; c++) {
+        const float2 lo = get_point(2 * n + 2 * c);
+        const float2 hi = get_point(2 * n + 2 * c + 1);
+        if (any(pos.xy < lo) || any(pos.xy > hi)) continue;
+        const uint i0 = c * chunk;
+        const uint i1 = min(i0 + chunk, n - 1);
+        float2 pa = get_point(i0);
+        float ra = get_point(n + i0).x;
+        d = min(d, length(pos.xy - pa) - ra);
+        [loop] for (uint i = i0 + 1; i <= i1; i++) {
+            const float2 pb = get_point(i);
+            const float rb = get_point(n + i).x;
+            d = min(d, length(pos.xy - pb) - rb);
+            const float2 ba = pb - pa;
+            const float hh = length(ba);
+            // 片方の円がもう片方を含む（区間が半径の差より短い）ときは、両端の円だけで足りる
+            if (i != split && hh > abs(ra - rb) + 1e-4) {
+                const float2 e = ba / hh;
+                const float2 p = pos.xy - pa;
+                const float2 pl = float2(abs(p.x * e.y - p.y * e.x), dot(p, e));
+                const float sb = (ra - rb) / hh;
+                const float ca = sqrt(1 - sb * sb);
+                const float k = dot(pl, float2(-sb, ca));
+                float dd = dot(pl, float2(ca, sb)) - ra;
+                if (k < 0) dd = length(pl) - ra;
+                else if (k > ca * hh) dd = length(pl - float2(0, hh)) - rb;
+                d = min(d, dd);
+            }
+            pa = pb;
+            ra = rb;
+        }
+    }
+    const float a = saturate(1 - d / aa_thick);
+    return float4(col_v.rgb * a, a);
+}
+]]
 
 if #code > 0 then
     assert(loadstring(code))()
@@ -114,6 +202,23 @@ rand_fix_end = (rand_fix_end == nil) or rand_fix_end
 rand_seed = math.min(math.max(math.floor(0.5 + (rand_seed or 10000)), -2 ^ 16), 2 ^ 16 - 1)
 length_ratio = math.min(math.max(length_ratio or 100, 0), 100) / 100
 length_apply = math.min(math.max(math.floor(0.5 + (length_apply or 0)), 0), 3)
+-- 線の先細り・線の波（v2.10）。% は 0〜1 に直す。既定（長さ 0・波の大きさ 0）では var_width が偽で、
+-- 描き方は v2.01 と同じ Path_S のライン
+taper_start_len = math.min(math.max(taper_start_len or 0, 0), 100) / 100
+taper_end_len = math.min(math.max(taper_end_len or 0, 0), 100) / 100
+taper_start_width = math.min(math.max(taper_start_width or 0, 0), 100) / 100
+taper_end_width = math.min(math.max(taper_end_width or 0, 0), 100) / 100
+taper_start_round = math.min(math.max(taper_start_round or 0, 0), 100) / 100
+taper_end_round = math.min(math.max(taper_end_round or 0, 0), 100) / 100
+wave_amount = math.min(math.max(wave_amount or 0, 0), 100) / 100
+wave_length = math.max(wave_length or 100, 4)
+wave_phase = wave_phase or 0
+-- 波長の下限（v2.10 の改め）: 波長が太さの半分より短い波は、隣り合う太い円に埋もれて縁の揺れが見えない
+-- （太さ 20・波長 8 で縁の揺れ ±0.8px）のに、点だけが増えて重くなる。描くときは太さの半分を波長の下限にする
+-- （縁の揺れの深さは およそ 太さ / 16）。項目の値はそのまま（保存済みのプロジェクトの値を変えない）
+local wave_len = math.max(wave_length, line / 2)
+local var_width = (taper_start_len > 0 and taper_start_width < 1)
+    or (taper_end_len > 0 and taper_end_width < 1) or wave_amount > 0
 
 -- セグメントごとに波形パスを生成して結合
 local function gen_segment_pts(length, phase_offset)
@@ -231,6 +336,7 @@ end
 -- パス測定(@ラインσ準拠)
 path_s.transform(pts, n_pts, 1, 0)
 local L, R, T, B, len = path_s.measure(pts, n_pts)
+local len_full = len -- 線の伸びで切る前の全長（線の波の位置の基準。v2.10）
 
 -- パスを長さ比率でトリムする関数
 local function trim_path(src_pts, src_n, src_len, start_ratio, end_ratio)
@@ -326,7 +432,131 @@ obj.setoption("drawtarget", "tempbuffer", w, h)
 obj.copybuffer("object", "tempbuffer")
 obj.clearbuffer("object", color)
 
-if use_two_segments then
+if var_width then
+    -- 線の先細り・線の波（v2.10）: 太さが道のりで変わるので、太さが一定の Path_S のラインではなく
+    -- ps_cl_taper で描く。端は円・線結合はラウンドと同じ形になり、破線と端の形状「四角」は効かない。
+    -- キャンバスと中心は上の Path_S の計算のまま（太さの倍率は 1 以下なので収まる）。
+    -- 式の検証器: AI/scripts/連結ライン_Hex/verify_taper_ik.py
+    -- 正本: この @描画 の taper_lengths / width_mul / radius_of / resample（@2関節IK は写し。直すときは両方）
+    local function taper_lengths(total)
+        -- 始まりと終わりの先細りの長さ（px）。合わせて全長を超えるときは比で縮める
+        local ls = taper_start_width < 1 and taper_start_len * total or 0
+        local le = taper_end_width < 1 and taper_end_len * total or 0
+        if ls + le > total and ls + le > 0 then
+            local k = total / (ls + le)
+            ls, le = ls * k, le * k
+        end
+        return ls, le
+    end
+    local function width_mul(s, total, ls, le, x)
+        -- 道のり s（0〜total）での太さの倍率。丸み 0 で直線、100 で円弧の形に細る。
+        -- x は線の波の位置（線の伸びで切る前の始点からの道のり）
+        local m = 1
+        if ls > 0 and s < ls then
+            local u = math.max(s / ls, 0)
+            local f = (1 - taper_start_round) * u + taper_start_round * math.max(1 - (1 - u) ^ 2, 0) ^ 0.5
+            m = math.min(m, taper_start_width + (1 - taper_start_width) * f)
+        end
+        if le > 0 and s > total - le then
+            local u = math.max((total - s) / le, 0)
+            local f = (1 - taper_end_round) * u + taper_end_round * math.max(1 - (1 - u) ^ 2, 0) ^ 0.5
+            m = math.min(m, taper_end_width + (1 - taper_end_width) * f)
+        end
+        if wave_amount > 0 then
+            -- 位相を増やすと波が終わりの方へ流れる
+            m = m * (1 - wave_amount * (1 - math.cos(2 * math.pi * x / wave_len - wave_phase * math.pi / 180)) / 2)
+        end
+        return m
+    end
+    local function radius_of(wd)
+        -- Path_S の carve の「余白」(太さ - 1) / 2 に合わせる。太さ 1 未満は中心の濃さが太さに比例して
+        -- 薄れるよう (太さ - 1) にする（ぼかし幅 1 で Path_S の「太さ 1 未満は薄くする」と同じ濃さ）
+        return wd >= 1 and (wd - 1) / 2 or wd - 1
+    end
+    local function resample(src, n)
+        -- 元の頂点に、先細りの区間（両端を含めて 64 等分、1px 以上）と線の波（下限を付けた波長の 1/16、1px 以上、
+        -- 全体で 3000 点まで）の点を道のりで足して取り直す。区間の両端を入れないと、先細りの終わりと
+        -- 真ん中の間が細く補間される。戻り値: 点列, 各点の道のり, 点の数, 全長, 先細りの長さ 2 つ
+        local cum = { 0 }
+        for i = 2, n do
+            cum[i] = cum[i - 1] + ((src[2 * i - 1] - src[2 * i - 3]) ^ 2 + (src[2 * i] - src[2 * i - 2]) ^ 2) ^ 0.5
+        end
+        local total = cum[n]
+        local ls, le = taper_lengths(total)
+        local pos = {}
+        for i = 1, n do pos[i] = cum[i] end
+        local function fill(a, b, step)
+            if b - a <= 0 then return end
+            local k = math.ceil((b - a) / step)
+            for j = 0, k do pos[#pos + 1] = a + (b - a) * j / k end
+        end
+        fill(0, ls, math.max(ls / 64, 1))
+        fill(total - le, total, math.max(le / 64, 1))
+        if wave_amount > 0 then fill(0, total, math.max(wave_len / 16, total / 3000, 1)) end
+        table.sort(pos)
+        local out, s_out, m, j, last = {}, {}, 0, 1, 0
+        for _, s in ipairs(pos) do
+            if m == 0 or s - last > 1e-6 then
+                while j < n - 1 and cum[j + 1] < s do j = j + 1 end
+                local seg = cum[j + 1] - cum[j]
+                local f = seg > 0 and math.min(math.max((s - cum[j]) / seg, 0), 1) or 0
+                m = m + 1
+                out[2 * m - 1] = src[2 * j - 1] + f * (src[2 * j + 1] - src[2 * j - 1])
+                out[2 * m] = src[2 * j] + f * (src[2 * j + 2] - src[2 * j])
+                s_out[m], last = s, s
+            end
+        end
+        return out, s_out, m, total, ls, le
+    end
+
+    local xy, rr, n_all, split = {}, {}, 0, 0
+    local function add_piece(src, n, origin)
+        local rp, rs, rn, total, ls, le = resample(src, n)
+        for i = 1, rn do
+            n_all = n_all + 1
+            xy[2 * n_all - 1], xy[2 * n_all] = rp[2 * i - 1] - L + th, rp[2 * i] - T + th
+            rr[2 * n_all - 1] = radius_of(line * width_mul(rs[i], total, ls, le, origin + rs[i]))
+            rr[2 * n_all] = 0
+        end
+    end
+    if use_two_segments then
+        add_piece(seg1_pts, seg1_n, 0)
+        split = n_all -- 2 本目の最初の点（0 始まりの番号）で始まる区間をつながない
+        add_piece(seg2_pts, seg2_n, (1 - length_ratio / 2) * len_full)
+    else
+        local origin = 0
+        if length_ratio < 1 then
+            if length_apply == 0 then
+                origin = (1 - length_ratio) * len_full
+            elseif length_apply == 3 then
+                origin = (1 - length_ratio) / 2 * len_full
+            end
+        end
+        add_piece(pts, n_pts, origin)
+    end
+    -- 点の座標の後ろに (半径, 0) を同じ数だけ並べ、その後ろに塊ごとの外接矩形（左上, 右下）を並べて送る。
+    -- 塊は 0 始まりの点 64c〜64c+64（隣の塊と端の 1 点を共有）で、矩形は各点の円を 半径＋ぼかし幅＋1px
+    -- （送るときの丸め 1/256px の余裕）で広げたもの。シェーダーは矩形の外の画素でその塊の区間を回さない。
+    -- 全区間を毎画素回すと、画面の対角の線（約 2300 点）で 1 フレーム 86ms かかった（v2.10、TPR-10）
+    local chunk = 64
+    local n_chunks = math.max(math.ceil((n_all - 1) / chunk), 1)
+    local aa_thick = math.max(antialias, 1 / 1024)
+    for i = 1, 2 * n_all do xy[2 * n_all + i] = rr[i] end
+    for c = 0, n_chunks - 1 do
+        local x0, y0, x1, y1 = math.huge, math.huge, -math.huge, -math.huge
+        for i = c * chunk + 1, math.min(c * chunk + chunk, n_all - 1) + 1 do
+            local e = math.max(rr[2 * i - 1], 0) + aa_thick + 1
+            x0, y0 = math.min(x0, xy[2 * i - 1] - e), math.min(y0, xy[2 * i] - e)
+            x1, y1 = math.max(x1, xy[2 * i - 1] + e), math.max(y1, xy[2 * i] + e)
+        end
+        xy[4 * n_all + 4 * c + 1], xy[4 * n_all + 4 * c + 2] = x0, y0
+        xy[4 * n_all + 4 * c + 3], xy[4 * n_all + 4 * c + 4] = x1, y1
+    end
+    path_s.send(xy, 2 * n_all + 2 * n_chunks, 0, 0)
+    obj.pixelshader("ps_cl_taper", "object", { "tempbuffer" }, {
+        math.floor(color / 65536) % 256 / 255, math.floor(color / 256) % 256 / 255, color % 256 / 255, 1,
+        n_all, split, aa_thick, chunk })
+elseif use_two_segments then
     -- 始端と末端: 第1セグメント描画後、第2セグメントをalpha_maxで合成
     path_s.send(seg1_pts, seg1_n, -L + th, -T + th)
     obj.effect("パスマスク(ライン)σ@Path_S", "点リスト", "", "PI",
@@ -357,4 +587,294 @@ else
 end
 
 -- 中心位置調整(@ラインσ準拠でクランプバグ修正)
+obj.cx, obj.cy = -w / 2 - L + th, -h / 2 - T + th
+
+@2関節IK
+--information:2関節IK@連結ライン_Hex v1.00 by HexBrowns
+--label:HexScript
+--value@root_id:根元のID,1
+--value@tip_id:先端のID,2
+--track@bone1_len:上の骨の長さ,0,4000,200,0.01
+--track@bone2_len:下の骨の長さ,0,4000,200,0.01
+--select@bend_dir:曲げる向き=0,時計回り=0,反時計回り=1
+--select@draw_mode:描き方=0,骨=0,管=1
+--track@width:太さ,0,500,10,0.01
+--color@line_color:ラインの色,0xFFFFFF
+--track@antialias:ぼかし幅,0,100,1,0.01
+--value@joint_id:関節の登録ID,0
+--group:線の先細り,false
+--track@taper_start_len:始まりの長さ,0,100,0,0.01
+--track@taper_end_len:終わりの長さ,0,100,0,0.01
+--track@taper_start_width:始まりの太さ,0,100,0,0.01
+--track@taper_end_width:終わりの太さ,0,100,0,0.01
+--track@taper_start_round:始まりの丸み,0,100,0,0.01
+--track@taper_end_round:終わりの丸み,0,100,0,0.01
+--group
+--[[pixelshader@ps_cl_taper_ik:
+// 正本は @描画 の ps_cl_taper（この写しと同じ中身。直すときは両方）。
+// 点 i の座標を get_point(i)、半径を get_point(n + i).x で読み、2 つの円の凸包を区間ごとに描く。
+// decode_float と get_point は Path_S v2.30 の carve の写し（sigma-axis, MIT）。出力は乗算済み。
+// 塊ごとの外接矩形の外の画素では、その塊の区間を回さない（正本の説明を参照）。
+Texture2D<half4> coords : register(t0);
+cbuffer constant0 : register(b0) {
+    float4 col_v;
+    float n_pts_f;
+    float split_f;
+    float aa_thick;
+    float chunk_f;
+};
+float decode_float(half3 c)
+{
+    const uint3 c_i = floor(255 * c + 0.5);
+    const int i = (c_i.r << 8) | (c_i.g << 16) | (c_i.b << 24);
+    return i / float(1 << 16);
+}
+float2 get_point(uint i)
+{
+    static const uint log2_span_x = 12, span_x = 1 << log2_span_x;
+    const uint x = (i << 1) & (span_x - 1), y = i >> (log2_span_x - 1);
+    return float2(
+        decode_float(coords[uint2(x | 0, y)].rgb),
+        decode_float(coords[uint2(x | 1, y)].rgb));
+}
+float4 ps_cl_taper_ik(float4 pos : SV_Position) : SV_Target
+{
+    const uint n = uint(n_pts_f);
+    const uint split = uint(split_f);
+    const uint chunk = uint(chunk_f);
+    const uint n_chunks = max((n + chunk - 2) / chunk, 1);
+    float d = 1e20;
+    [loop] for (uint c = 0; c < n_chunks; c++) {
+        const float2 lo = get_point(2 * n + 2 * c);
+        const float2 hi = get_point(2 * n + 2 * c + 1);
+        if (any(pos.xy < lo) || any(pos.xy > hi)) continue;
+        const uint i0 = c * chunk;
+        const uint i1 = min(i0 + chunk, n - 1);
+        float2 pa = get_point(i0);
+        float ra = get_point(n + i0).x;
+        d = min(d, length(pos.xy - pa) - ra);
+        [loop] for (uint i = i0 + 1; i <= i1; i++) {
+            const float2 pb = get_point(i);
+            const float rb = get_point(n + i).x;
+            d = min(d, length(pos.xy - pb) - rb);
+            const float2 ba = pb - pa;
+            const float hh = length(ba);
+            if (i != split && hh > abs(ra - rb) + 1e-4) {
+                const float2 e = ba / hh;
+                const float2 p = pos.xy - pa;
+                const float2 pl = float2(abs(p.x * e.y - p.y * e.x), dot(p, e));
+                const float sb = (ra - rb) / hh;
+                const float ca = sqrt(1 - sb * sb);
+                const float k = dot(pl, float2(-sb, ca));
+                float dd = dot(pl, float2(ca, sb)) - ra;
+                if (k < 0) dd = length(pl) - ra;
+                else if (k > ca * hh) dd = length(pl - float2(0, hh)) - rb;
+                d = min(d, dd);
+            }
+            pa = pb;
+            ra = rb;
+        }
+    }
+    const float a = saturate(1 - d / aa_thick);
+    return float4(col_v.rgb * a, a);
+}
+]]
+
+-- 2 つの登録点（根元・先端）を、決まった長さの 2 本の骨でつなぐ（2 関節 IK。v1.00）。
+-- 関節（肘・膝）の位置は 2 つの円の交点として解析的に解く。届かないときは先端の方へ伸び切り、
+-- 近すぎるときは折りたたむ（どちらも先端は登録点に届かない）。
+-- 描き方「骨」は根元→関節→先端の 2 本の線、「管」は長さ（上の骨＋下の骨）を保って円弧で曲がる 1 本の線。
+-- 点は @座標登録 の _ANCHOR_LINE_DATA から読み、描く位置の決め方は @描画 と同じ（このオブジェクトの位置＋登録点）。
+-- 式の検証器: AI/scripts/連結ライン_Hex/verify_taper_ik.py
+
+local anchors = _G._ANCHOR_LINE_DATA
+if not anchors then
+    obj.alpha = 0
+    return
+end
+root_id, tip_id, joint_id = tonumber(root_id), tonumber(tip_id), tonumber(joint_id)
+local pa, pb = root_id and anchors[root_id], tip_id and anchors[tip_id]
+if not (pa and pb) then
+    obj.alpha = 0
+    return
+end
+
+local path_s = require "Path_S"
+local line = math.max(width or 10, 0)
+local color = math.floor(0.5 + (line_color or 0xffffff)) % 2 ^ 24
+antialias = math.max(antialias or 0, 0)
+bone1_len = math.max(bone1_len or 0, 0)
+bone2_len = math.max(bone2_len or 0, 0)
+-- 時計回り: 画面で見て 根元→関節→先端 が右回り（y が下向きの画面で外積が正）に折れる
+local side = math.floor(0.5 + (bend_dir or 0)) == 1 and -1 or 1
+draw_mode = math.min(math.max(math.floor(0.5 + (draw_mode or 0)), 0), 1)
+taper_start_len = math.min(math.max(taper_start_len or 0, 0), 100) / 100
+taper_end_len = math.min(math.max(taper_end_len or 0, 0), 100) / 100
+taper_start_width = math.min(math.max(taper_start_width or 0, 0), 100) / 100
+taper_end_width = math.min(math.max(taper_end_width or 0, 0), 100) / 100
+taper_start_round = math.min(math.max(taper_start_round or 0, 0), 100) / 100
+taper_end_round = math.min(math.max(taper_end_round or 0, 0), 100) / 100
+
+-- 2 関節 IK。戻り値: 関節, 届いた先端, 根元から先端への単位ベクトル, 根元から届いた先端までの距離
+local function solve_ik(ax, ay, bx, by, l1, l2)
+    local dx, dy = bx - ax, by - ay
+    local d = (dx * dx + dy * dy) ^ 0.5
+    local ux, uy = 0, 1 -- 根元と先端が重なったときは下向きに折る
+    if d > 1e-9 then ux, uy = dx / d, dy / d end
+    local d_eff = math.min(math.max(d, math.abs(l1 - l2)), l1 + l2)
+    local a, h = 0, l1
+    if d_eff > 1e-9 then
+        a = (l1 * l1 - l2 * l2 + d_eff * d_eff) / (2 * d_eff)
+        h = math.max(l1 * l1 - a * a, 0) ^ 0.5
+    end
+    local nx, ny = side * uy, -side * ux
+    return ax + a * ux + h * nx, ay + a * uy + h * ny, ax + d_eff * ux, ay + d_eff * uy, ux, uy, d_eff
+end
+
+local ax, ay = pa.x, pa.y
+local jx, jy, tx, ty, ux, uy, d_eff = solve_ik(ax, ay, pb.x, pb.y, bone1_len, bone2_len)
+local pts, n_pts
+if draw_mode == 0 then
+    pts, n_pts = { ax, ay, jx, jy, tx, ty }, 3
+else
+    -- 管: 弦の長さ d_eff・弧の長さ total の円弧。半角 θ は sin θ / θ = d_eff / total（0 < θ <= π）を二分法で解く
+    local total = bone1_len + bone2_len
+    local k = total > 0 and d_eff / total or 1
+    if k >= 1 - 1e-7 then
+        pts, n_pts = { ax, ay, tx, ty }, 2
+        jx, jy = ax + bone1_len * ux, ay + bone1_len * uy
+    else
+        local lo, hi = 0, math.pi
+        for _ = 1, 60 do
+            local mid = (lo + hi) / 2
+            if math.sin(mid) / mid > k then lo = mid else hi = mid end
+        end
+        local half = (lo + hi) / 2
+        local rad = total / (2 * half)
+        local nx, ny = side * uy, -side * ux
+        -- 中心は弦の中点から、膨らむ側と逆へ rad cos θ（θ > π/2 なら膨らむ側へ）
+        local cx = (ax + tx) / 2 - nx * rad * math.cos(half)
+        local cy = (ay + ty) / 2 - ny * rad * math.cos(half)
+        -- 弧の点 P(t) = 中心 + rad * (n を (2t - 1) θ side だけ回したもの)。t は弧の長さの割合
+        local function arc_at(t)
+            local ang = (2 * t - 1) * half * side
+            local c, s = math.cos(ang), math.sin(ang)
+            return cx + rad * (nx * c - ny * s), cy + rad * (nx * s + ny * c)
+        end
+        local seg = math.min(math.max(math.ceil(2 * half / (math.pi / 48)), math.ceil(total / 16), 2), 512)
+        pts, n_pts = {}, seg + 1
+        for i = 0, seg do
+            pts[2 * i + 1], pts[2 * i + 2] = arc_at(i / seg)
+        end
+        -- 端は計算の丸めを残さず根元と届いた先端に合わせる
+        pts[1], pts[2], pts[2 * seg + 1], pts[2 * seg + 2] = ax, ay, tx, ty
+        jx, jy = arc_at(total > 0 and bone1_len / total or 0)
+    end
+end
+
+-- 関節を登録する（ほかのオブジェクトが肘・膝の位置を @描画 などで使える）。
+-- 位置は描いた関節（このオブジェクトの位置＋関節）。根元・先端と同じ ID は上書きになるので登録しない。
+-- 同じフレームで使えるのは、このオブジェクトより後に描かれる（下のレイヤーの）オブジェクト
+if joint_id and joint_id ~= 0 and joint_id ~= root_id and joint_id ~= tip_id then
+    anchors[joint_id] = {
+        x = obj.x + obj.ox + jx,
+        y = obj.y + obj.oy + jy,
+        z = obj.z + obj.oz,
+        frame = obj.frame
+    }
+end
+
+-- 描画（@描画 の線の先細りと同じ作り。正本は @描画 の taper_lengths / width_mul / radius_of / resample。
+-- ここでは線の波は無い）
+local function taper_lengths(total)
+    local ls = taper_start_width < 1 and taper_start_len * total or 0
+    local le = taper_end_width < 1 and taper_end_len * total or 0
+    if ls + le > total and ls + le > 0 then
+        local k = total / (ls + le)
+        ls, le = ls * k, le * k
+    end
+    return ls, le
+end
+local function width_mul(s, total, ls, le)
+    local m = 1
+    if ls > 0 and s < ls then
+        local u = math.max(s / ls, 0)
+        local f = (1 - taper_start_round) * u + taper_start_round * math.max(1 - (1 - u) ^ 2, 0) ^ 0.5
+        m = math.min(m, taper_start_width + (1 - taper_start_width) * f)
+    end
+    if le > 0 and s > total - le then
+        local u = math.max((total - s) / le, 0)
+        local f = (1 - taper_end_round) * u + taper_end_round * math.max(1 - (1 - u) ^ 2, 0) ^ 0.5
+        m = math.min(m, taper_end_width + (1 - taper_end_width) * f)
+    end
+    return m
+end
+local function radius_of(wd)
+    return wd >= 1 and (wd - 1) / 2 or wd - 1
+end
+local function resample(src, n)
+    local cum = { 0 }
+    for i = 2, n do
+        cum[i] = cum[i - 1] + ((src[2 * i - 1] - src[2 * i - 3]) ^ 2 + (src[2 * i] - src[2 * i - 2]) ^ 2) ^ 0.5
+    end
+    local total = cum[n]
+    local ls, le = taper_lengths(total)
+    local pos = {}
+    for i = 1, n do pos[i] = cum[i] end
+    local function fill(a, b, step)
+        if b - a <= 0 then return end
+        local k = math.ceil((b - a) / step)
+        for j = 0, k do pos[#pos + 1] = a + (b - a) * j / k end
+    end
+    fill(0, ls, math.max(ls / 64, 1))
+    fill(total - le, total, math.max(le / 64, 1))
+    table.sort(pos)
+    local out, s_out, m, j, last = {}, {}, 0, 1, 0
+    for _, s in ipairs(pos) do
+        if m == 0 or s - last > 1e-6 then
+            while j < n - 1 and cum[j + 1] < s do j = j + 1 end
+            local seg = cum[j + 1] - cum[j]
+            local f = seg > 0 and math.min(math.max((s - cum[j]) / seg, 0), 1) or 0
+            m = m + 1
+            out[2 * m - 1] = src[2 * j - 1] + f * (src[2 * j + 1] - src[2 * j - 1])
+            out[2 * m] = src[2 * j] + f * (src[2 * j + 2] - src[2 * j])
+            s_out[m], last = s, s
+        end
+    end
+    return out, s_out, m, total, ls, le
+end
+
+local L, R, T, B = path_s.measure(pts, n_pts)
+local th = math.ceil(path_s.line_inflation(0, 0, 0, line, antialias, 1, nil))
+local w, h = math.ceil(R - L) + 2 * th, math.ceil(B - T) + 2 * th
+obj.setoption("drawtarget", "tempbuffer", w, h)
+obj.copybuffer("object", "tempbuffer")
+
+local rp, rs, rn, total, ls, le = resample(pts, n_pts)
+local xy = {}
+for i = 1, rn do
+    xy[2 * i - 1], xy[2 * i] = rp[2 * i - 1] - L + th, rp[2 * i] - T + th
+    xy[2 * rn + 2 * i - 1] = radius_of(line * width_mul(rs[i], total, ls, le))
+    xy[2 * rn + 2 * i] = 0
+end
+-- 塊ごとの外接矩形を点と半径の後ろに並べる（@描画 と同じ作り。正本は @描画）
+local chunk = 64
+local n_chunks = math.max(math.ceil((rn - 1) / chunk), 1)
+local aa_thick = math.max(antialias, 1 / 1024)
+for c = 0, n_chunks - 1 do
+    local x0, y0, x1, y1 = math.huge, math.huge, -math.huge, -math.huge
+    for i = c * chunk + 1, math.min(c * chunk + chunk, rn - 1) + 1 do
+        local e = math.max(xy[2 * rn + 2 * i - 1], 0) + aa_thick + 1
+        x0, y0 = math.min(x0, xy[2 * i - 1] - e), math.min(y0, xy[2 * i] - e)
+        x1, y1 = math.max(x1, xy[2 * i - 1] + e), math.max(y1, xy[2 * i] + e)
+    end
+    xy[4 * rn + 4 * c + 1], xy[4 * rn + 4 * c + 2] = x0, y0
+    xy[4 * rn + 4 * c + 3], xy[4 * rn + 4 * c + 4] = x1, y1
+end
+path_s.send(xy, 2 * rn + 2 * n_chunks, 0, 0)
+obj.pixelshader("ps_cl_taper_ik", "object", { "tempbuffer" }, {
+    math.floor(color / 65536) % 256 / 255, math.floor(color / 256) % 256 / 255, color % 256 / 255, 1,
+    rn, 0, aa_thick, chunk })
+
+-- 中心位置（@描画 と同じ。登録点の座標がこのオブジェクトの位置からの相対になる）
 obj.cx, obj.cy = -w / 2 - L + th, -h / 2 - T + th
